@@ -74,6 +74,7 @@ func addExpiry(key string, ttl time.Time) error {
 	defer chLock.Unlock()
 	var ex ttlExp
 	ex.exp = ttl
+	ex.items = make(map[string]bool)
 	ex.items[key] = true
 	ex.next = nil
 	expHash[ttl] = ex
