@@ -34,6 +34,7 @@ var kvLock = &sync.Mutex{}
 /* Linked list to handle expiry of events */
 type ttlExp struct {
 	next  *ttlExp
+	name  string
 	exp   time.Time
 	lock  *sync.Mutex
 	items map[string]bool
@@ -74,6 +75,7 @@ func addExpiry(key string, ttl time.Time) error {
 	defer chLock.Unlock()
 	var ex ttlExp
 	ex.exp = ttl
+	ex.name = key
 	ex.items = make(map[string]bool)
 	ex.items[key] = true
 	ex.next = nil
@@ -91,7 +93,7 @@ func addExpiry(key string, ttl time.Time) error {
 		if curr.exp.Before(ttl) {
 			prev.next = &ex
 			ex.next = curr
-			fmt.Printf("Inserting between %v and %v\n", prev.exp, curr.exp)
+			fmt.Printf("Inserting between %s and %s\n", prev.name, curr.name)
 			return nil
 		}
 		if curr.next == nil {
