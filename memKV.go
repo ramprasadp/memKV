@@ -70,9 +70,37 @@ func addExpiry(key string, ttl time.Time) error {
 		t.lock.Unlock()
 		return nil
 	}
+	chLock.Lock()
+	defer chLock.Unlock()
 	var ex ttlExp
-
-	return nil
+	ex.exp = ttl
+	ex.items[key] = true
+	ex.next = nil
+	expHash[ttl] = ex
+	curr := firstExpire
+	/* if this key is going to be the first to expire set it  */
+	if firstExpire == nil || ttl.Before(firstExpire.exp) {
+		firstExpire = &ex
+		firstExpire.next = curr
+		fmt.Printf("Inserting At the beginning\n")
+		return nil
+	}
+	prev := firstExpire
+	for {
+		if curr.exp.Before(ttl) {
+			prev.next = &ex
+			ex.next = curr
+			fmt.Printf("Inserting between %v and %v\n", prev.exp, curr.exp)
+			return nil
+		}
+		if curr.next == nil {
+			curr.next = &ex
+			fmt.Printf("Inserting at the end \n")
+			return nil
+		}
+		prev = curr
+		curr = curr.next
+	}
 }
 func setex(s []string) []byte {
 	if len(s) != 4 {
@@ -150,6 +178,7 @@ func main() {
 	ln := openSocket(":9980")
 	mainkv = make(map[string]tVal)
 	expHash = make(map[time.Time]ttlExp)
+	firstExpire = nil
 	for {
 		conn, _ := ln.Accept()
 		go processConnection(conn)
