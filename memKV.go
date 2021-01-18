@@ -15,13 +15,33 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
+/* Structure tp hold values and ttl */
+type tVal struct {
+	val string
+	exp time.Time
+}
+
 /* The main kv  hash that holds all the keys and values */
-var mainkv map[string]string
+var mainkv map[string]tVal
 var kvLock = &sync.Mutex{}
+
+/* Linked list to handle expiry of events */
+type ttlExp struct {
+	next  *ttlExp
+	exp   time.Time
+	lock  *sync.Mutex
+	items map[string]bool
+}
+
+var expHash map[time.Time]ttlExp
+var firstExpire *ttlExp
+var chLock = &sync.RWMutex{}
 
 func openSocket(addr string) net.Listener {
 	ln, err := net.Listen("tcp", addr)
@@ -39,14 +59,37 @@ func dump(s []string) []byte {
 
 }
 
+func addExpiry(key string, ttl time.Time) error {
+
+	chLock.RLock()
+	t, found := expHash[ttl]
+	chLock.RUnlock()
+	if found {
+		t.lock.Lock()
+		t.items[key] = true
+		t.lock.Unlock()
+		return nil
+	}
+	var ex ttlExp
+
+	return nil
+}
 func setex(s []string) []byte {
 	if len(s) != 4 {
 		return []byte("ERROR: Need exactly 3 params for setex\n")
 	}
-	kvLock.Lock()
-	mainkv[s[1]] = s[2]
-	kvLock.Unlock()
+	secs, err := strconv.Atoi(s[3])
+	if err != nil {
+		return []byte("ERROR: Invalid format for ttl in setex")
+	}
+	var t tVal
+	t.val = s[2]
+	t.exp = time.Now().Add(time.Second * time.Duration(secs))
 
+	kvLock.Lock()
+	mainkv[s[1]] = t
+	kvLock.Unlock()
+	addExpiry(t.val, t.exp)
 	return []byte("set done\n")
 }
 
@@ -66,8 +109,14 @@ func get(s []string) []byte {
 	}
 	kvLock.Lock()
 	defer kvLock.Unlock()
-	return []byte(mainkv[s[1]] + "\n")
+	return []byte(mainkv[s[1]].val + "\n")
 }
+func delExpired() {
+	for {
+
+	}
+}
+
 func processConnection(conn net.Conn) {
 	for {
 		message, _ := bufio.NewReader(conn).ReadString('\n')
@@ -99,7 +148,8 @@ func main() {
 
 	// open the socket for communication
 	ln := openSocket(":9980")
-	mainkv = make(map[string]string)
+	mainkv = make(map[string]tVal)
+	expHash = make(map[time.Time]ttlExp)
 	for {
 		conn, _ := ln.Accept()
 		go processConnection(conn)
