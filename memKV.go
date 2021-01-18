@@ -24,7 +24,7 @@ import (
 /* Structure tp hold values and ttl */
 type tVal struct {
 	val string
-	exp time.Time
+	exp int64
 }
 
 /* The main kv  hash that holds all the keys and values */
@@ -35,12 +35,12 @@ var kvLock = &sync.Mutex{}
 type ttlExp struct {
 	next  *ttlExp
 	name  string
-	exp   time.Time
+	exp   int64
 	lock  *sync.Mutex
 	items map[string]bool
 }
 
-var expHash map[time.Time]ttlExp
+var expHash map[int64]ttlExp
 var firstExpire *ttlExp
 var chLock = &sync.RWMutex{}
 
@@ -60,14 +60,15 @@ func dump(s []string) []byte {
 
 }
 
-func addExpiry(key string, ttl time.Time) error {
+func addExpiry(name string, ttl int64) error {
 
+	fmt.Printf("%s => Looking for hash on epoch %d\n", name, ttl)
 	chLock.RLock()
 	t, found := expHash[ttl]
 	chLock.RUnlock()
 	if found {
 		t.lock.Lock()
-		t.items[key] = true
+		t.items[name] = true
 		t.lock.Unlock()
 		return nil
 	}
@@ -75,14 +76,15 @@ func addExpiry(key string, ttl time.Time) error {
 	defer chLock.Unlock()
 	var ex ttlExp
 	ex.exp = ttl
-	ex.name = key
+	ex.name = name
+	ex.lock = &sync.Mutex{}
 	ex.items = make(map[string]bool)
-	ex.items[key] = true
+	ex.items[name] = true
 	ex.next = nil
 	expHash[ttl] = ex
 	curr := firstExpire
 	/* if this key is going to be the first to expire set it  */
-	if firstExpire == nil || ttl.Before(firstExpire.exp) {
+	if firstExpire == nil || ttl < firstExpire.exp {
 		firstExpire = &ex
 		firstExpire.next = curr
 		fmt.Printf("Inserting At the beginning\n")
@@ -90,7 +92,7 @@ func addExpiry(key string, ttl time.Time) error {
 	}
 	prev := firstExpire
 	for {
-		if curr.exp.Before(ttl) {
+		if curr.exp > ttl {
 			prev.next = &ex
 			ex.next = curr
 			fmt.Printf("Inserting between %s and %s\n", prev.name, curr.name)
@@ -107,30 +109,47 @@ func addExpiry(key string, ttl time.Time) error {
 }
 func setex(s []string) []byte {
 	if len(s) != 4 {
-		return []byte("ERROR: Need exactly 3 params for setex\n")
+		return []byte("500 ERROR: Need exactly 3 params for setex\n")
 	}
 	secs, err := strconv.Atoi(s[3])
 	if err != nil {
-		return []byte("ERROR: Invalid format for ttl in setex")
+		return []byte("501 ERROR: Invalid format for ttl in setex")
 	}
 	var t tVal
 	t.val = s[2]
-	t.exp = time.Now().Add(time.Second * time.Duration(secs))
-
+	t.exp = time.Now().Unix() + int64(secs)
+	fmt.Printf("key = %s , expiry = %v\n", s[1], t.exp)
 	kvLock.Lock()
 	mainkv[s[1]] = t
 	kvLock.Unlock()
-	addExpiry(t.val, t.exp)
-	return []byte("set done\n")
+	err = addExpiry(s[1], t.exp)
+	if err != nil {
+		return []byte("502 ERROR: Error setting up Linked list")
+	}
+
+	return []byte("200 SUCCESS: set done\n")
 }
 
 func del(s []string) []byte {
 	if len(s) != 2 {
 		return []byte("ERROR: Need exactly 1 param for del\n")
 	}
+
+	t, found := mainkv[s[1]]
+	if !found {
+		return []byte("No such key\n")
+	}
+	ex, found := expHash[t.exp]
+	if found {
+		ex.lock.Lock()
+		delete(ex.items, s[1])
+		ex.lock.Unlock()
+	}
+
 	kvLock.Lock()
 	delete(mainkv, s[1])
 	kvLock.Unlock()
+
 	return []byte("Del complete\n")
 }
 
@@ -142,12 +161,56 @@ func get(s []string) []byte {
 	defer kvLock.Unlock()
 	return []byte(mainkv[s[1]].val + "\n")
 }
-func delExpired() {
-	for {
 
+func delExpired() {
+	fmt.Printf("Starting TTL thread for deleting the expired keys \n")
+	for {
+		curr := firstExpire
+		if curr == nil {
+			//	fmt.Printf("Nothing to expire waiting for some data\n")
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		diff := curr.exp - time.Now().Unix()
+		if diff > 0 {
+			if diff > 20 {
+				diff = 20
+			}
+			fmt.Printf("Sleeping for %d seconds\n", diff)
+			time.Sleep(time.Duration(diff) * time.Second)
+		}
+		fmt.Printf("Expiring items for list name %s\n", curr.name)
+		chLock.Lock()
+		delete(expHash, curr.exp)
+		firstExpire = curr.next
+		chLock.Unlock()
+		kvLock.Lock()
+		for k := range curr.items {
+			fmt.Printf("Expired item %s\n", k)
+			delete(mainkv, k)
+		}
+		kvLock.Unlock()
+		/* free() the memory of the list */
+		curr = firstExpire
 	}
 }
 
+func dump2(s []string) []byte {
+	ret := "Start "
+	curr := firstExpire
+	for {
+		if curr == nil {
+			return []byte(ret + "\n")
+		}
+		items := ""
+		for k := range curr.items {
+			items = items + " " + k
+
+		}
+		ret = fmt.Sprintf(" %s -> %s (%s)  ", ret, curr.name, items)
+		curr = curr.next
+	}
+}
 func processConnection(conn net.Conn) {
 	for {
 		message, _ := bufio.NewReader(conn).ReadString('\n')
@@ -168,6 +231,8 @@ func processConnection(conn net.Conn) {
 			conn.Write(del(s))
 		case "_dump":
 			conn.Write(dump(s))
+		case "_dump2":
+			conn.Write(dump2(s))
 		default:
 			conn.Write([]byte("ERROR: Not supported \n"))
 		}
@@ -180,8 +245,9 @@ func main() {
 	// open the socket for communication
 	ln := openSocket("0.0.0.0:9980")
 	mainkv = make(map[string]tVal)
-	expHash = make(map[time.Time]ttlExp)
+	expHash = make(map[int64]ttlExp)
 	firstExpire = nil
+	go delExpired()
 	for {
 		conn, _ := ln.Accept()
 		go processConnection(conn)
