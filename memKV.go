@@ -175,7 +175,7 @@ func processConnection(conn net.Conn) {
 func main() {
 
 	// open the socket for communication
-	ln := openSocket(":9980")
+	ln := openSocket("0.0.0.0:9980")
 	mainkv = make(map[string]tVal)
 	expHash = make(map[time.Time]ttlExp)
 	firstExpire = nil
